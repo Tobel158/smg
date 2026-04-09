@@ -213,7 +213,7 @@ pub enum ResponseContentPart {
         text: String,
         #[serde(default)]
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        annotations: Vec<String>,
+        annotations: Vec<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         logprobs: Option<ChatLogProbs>,
     },
@@ -357,6 +357,8 @@ pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Status for code interpreter tool calls.
@@ -1433,7 +1435,7 @@ impl ResponseContentPart {
     /// Create a new text content part
     pub fn new_text(
         text: String,
-        annotations: Vec<String>,
+        annotations: Vec<Value>,
         logprobs: Option<ChatLogProbs>,
     ) -> Self {
         Self::OutputText {

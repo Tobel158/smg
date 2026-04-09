@@ -550,6 +550,114 @@ pub(crate) fn inject_mcp_metadata_streaming(
     }
 }
 
+/// A web search source collected from tool execution results.
+struct CollectedWebSource {
+    url: String,
+    title: Option<String>,
+}
+
+/// Collect web search sources from the MCP call items accumulated during the tool loop.
+fn collect_web_search_sources(mcp_call_items: &[Value]) -> Vec<CollectedWebSource> {
+    let mut sources = Vec::new();
+    for item in mcp_call_items {
+        if item.get("type").and_then(|t| t.as_str()) != Some(ItemType::WEB_SEARCH_CALL) {
+            continue;
+        }
+        let Some(action) = item.get("action") else {
+            continue;
+        };
+        if let Some(arr) = action.get("sources").and_then(|v| v.as_array()) {
+            for src in arr {
+                if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                    sources.push(CollectedWebSource {
+                        url: url.to_string(),
+                        title: src.get("title").and_then(|v| v.as_str()).map(String::from),
+                    });
+                }
+            }
+        }
+    }
+    sources
+}
+
+/// Inject `url_citation` annotations into text output items based on web search sources.
+///
+/// After the tool loop completes, the upstream model's text response won't contain
+/// structured annotations because it processed function calls rather than native
+/// web search results. This function scans the text for URLs matching web search
+/// sources and creates `url_citation` annotations at the matched positions.
+fn inject_web_search_annotations(response: &mut Value, state: &ToolLoopState) {
+    let sources = collect_web_search_sources(&state.mcp_call_items);
+    if sources.is_empty() {
+        return;
+    }
+
+    let Some(output_array) = response.get_mut("output").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+
+    for item in output_array.iter_mut() {
+        if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(content_array) = item.get_mut("content").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for content_part in content_array.iter_mut() {
+            if content_part.get("type").and_then(|t| t.as_str()) != Some("output_text") {
+                continue;
+            }
+            let Some(text) = content_part.get("text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let text = text.to_string();
+
+            let mut annotations: Vec<Value> = content_part
+                .get("annotations")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            for source in &sources {
+                // Search for the URL in the text
+                let mut search_from = 0;
+                while let Some(pos) = text[search_from..].find(&source.url) {
+                    let start = search_from + pos;
+                    let end = start + source.url.len();
+                    annotations.push(json!({
+                        "type": "url_citation",
+                        "start_index": start,
+                        "end_index": end,
+                        "url": source.url,
+                        "title": source.title.as_deref().unwrap_or("")
+                    }));
+                    search_from = end;
+                }
+            }
+
+            // If no URL literals were found in the text, append all sources as
+            // annotations covering the full text so clients can still display citations.
+            if annotations.is_empty() {
+                for source in &sources {
+                    annotations.push(json!({
+                        "type": "url_citation",
+                        "start_index": 0,
+                        "end_index": text.len(),
+                        "url": source.url,
+                        "title": source.title.as_deref().unwrap_or("")
+                    }));
+                }
+            }
+
+            if !annotations.is_empty() {
+                if let Some(obj) = content_part.as_object_mut() {
+                    obj.insert("annotations".to_string(), Value::Array(annotations));
+                }
+            }
+        }
+    }
+}
+
 /// Execute the tool calling loop
 pub(crate) async fn execute_tool_loop(
     client: &reqwest::Client,
@@ -602,6 +710,7 @@ pub(crate) async fn execute_tool_loop(
             );
             if state.total_calls > 0 {
                 inject_mcp_metadata_streaming(&mut response_json, &state, session);
+                inject_web_search_annotations(&mut response_json, &state);
             }
             return Ok(response_json);
         }

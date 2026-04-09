@@ -217,9 +217,11 @@ impl ResponseTransformer {
     fn parse_web_source(item: &serde_json::Value) -> Option<WebSearchSource> {
         let obj = item.as_object()?;
         let url = obj.get("url").and_then(|v| v.as_str())?;
+        let title = obj.get("title").and_then(|v| v.as_str()).map(String::from);
         Some(WebSearchSource {
             source_type: "url".to_string(),
             url: url.to_string(),
+            title,
         })
     }
 
